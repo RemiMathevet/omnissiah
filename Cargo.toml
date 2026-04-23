@@ -11,6 +11,6 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.22", features = ["extension-module"] }
 numpy = "0.22"
 rayon = "1.10"
-turbojpeg = { version = "1", default-features = false, features = ["cmake", "pkg-config"] }
+turbojpeg = { version = "1", default-features = false, features = ["cmake", "pkg-config", "require-simd"] }
 memmap2 = "0.9"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
