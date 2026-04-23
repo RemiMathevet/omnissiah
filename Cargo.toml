@@ -1,0 +1,16 @@
+[package]
+name = "omnissiah"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "omnissiah"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+numpy = "0.22"
+rayon = "1.10"
+turbojpeg = { version = "1", default-features = false, features = ["cmake", "pkg-config"] }
+memmap2 = "0.9"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
