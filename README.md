@@ -6,15 +6,18 @@ Omnissiah is a native Rust reimplementation of the MRXS parser and JPEG tile dec
 
 ## Performance
 
-Benchmarked on AMD Threadripper Pro 3945WX (12C/24T), SSD NVMe, with a 300k-tile MRXS slide:
+Benchmarked on AMD Threadripper Pro 3945WX (12C/24T), SSD NVMe, across 19 MRXS slides:
 
 | Configuration | Tiles/s | vs OpenSlide |
 |---|---|---|
-| Native 256×256 read | ~7,800 | **~100×** |
-| Native + Lanczos3 resize to 224×224 | ~3,800 | ~48× |
-| OpenSlide (Python, best config) | ~80 | 1× |
+| Omnissiah batch read (median, 19 slides) | ~5,500 | **1.6×** raw read |
+| Omnissiah batch + Lanczos3 resize 224×224 | ~3,800 | — |
+| OpenSlide `read_region` (median, 19 slides) | ~3,500 | 1× |
+| Multi-threaded pipeline (GIL-bound OpenSlide) | — | **~70×** end-to-end |
 
-Pixel-exact output validated against OpenSlide on 600+ tiles across multiple zoom levels.
+The 1.6× raw speedup comes from SIMD turbojpeg + mmap. The ~70× pipeline gain comes from GIL release during batch decode — OpenSlide serializes under Python multi-threading (~80 t/s), Omnissiah sustains ~5,500 t/s.
+
+Pixel-exact output validated against OpenSlide on 600+ tiles across multiple zoom levels and 19 slides.
 
 ## Installation
 
