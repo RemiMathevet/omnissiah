@@ -1,10 +1,12 @@
+#![allow(clippy::useless_conversion)]
+
 mod mrxs_parser;
 mod tile_decoder;
 
 use std::path::PathBuf;
 
 use numpy::ndarray::{Array3, Array4};
-use numpy::{IntoPyArray, PyArray3, PyArray4, PyArrayMethods, PyReadonlyArray2};
+use numpy::{IntoPyArray, PyArray3, PyArray4, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -24,11 +26,11 @@ impl MrxsReader {
     fn new(path: &str) -> PyResult<Self> {
         let mrxs_path = PathBuf::from(path);
         let slide_info =
-            parse_slidedat(&mrxs_path).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e))?;
+            parse_slidedat(&mrxs_path).map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
         let tile_index =
-            parse_index(&slide_info).map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e))?;
+            parse_index(&slide_info).map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
         let decoder = TileDecoder::new(&slide_info.data_file_paths)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e))?;
+            .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
 
         let total_tiles: usize = tile_index.levels.iter().map(|l| l.len()).sum();
         eprintln!(
@@ -106,7 +108,7 @@ impl MrxsReader {
                 let (pixels, w, h) = self
                     .decoder
                     .decode_tile(entry)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+                    .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
                 let arr = Array3::from_shape_vec((h, w, 3), pixels).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                         "Array shape error: {}",
@@ -177,6 +179,102 @@ impl MrxsReader {
         }
 
         Ok(result.into_pyarray_bound(py))
+    }
+
+    #[getter]
+    fn properties<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new_bound(py);
+        let info = &self.slide_info;
+        let l0 = &info.levels[0];
+
+        dict.set_item("openslide.mpp-x", l0.mpp_x)?;
+        dict.set_item("openslide.mpp-y", l0.mpp_y)?;
+        dict.set_item("openslide.objective-power", info.objective_magnification)?;
+        dict.set_item("openslide.level-count", info.levels.len())?;
+        dict.set_item("openslide.vendor", "mirax")?;
+
+        for (i, level) in info.levels.iter().enumerate() {
+            dict.set_item(format!("openslide.level[{}].width", i), level.width)?;
+            dict.set_item(format!("openslide.level[{}].height", i), level.height)?;
+            dict.set_item(
+                format!("openslide.level[{}].downsample", i),
+                level.downsample,
+            )?;
+            dict.set_item(format!("openslide.level[{}].tile-width", i), level.tile_w)?;
+            dict.set_item(format!("openslide.level[{}].tile-height", i), level.tile_h)?;
+        }
+
+        dict.set_item("mirax.GENERAL.SLIDE_ID", &info.slide_id)?;
+        dict.set_item("mirax.GENERAL.IMAGENUMBER_X", info.images_x)?;
+        dict.set_item("mirax.GENERAL.IMAGENUMBER_Y", info.images_y)?;
+        dict.set_item(
+            "mirax.GENERAL.OBJECTIVE_MAGNIFICATION",
+            info.objective_magnification,
+        )?;
+
+        Ok(dict)
+    }
+
+    #[getter]
+    fn level_count(&self) -> usize {
+        self.slide_info.levels.len()
+    }
+
+    #[getter]
+    fn dimensions(&self) -> (u64, u64) {
+        let l0 = &self.slide_info.levels[0];
+        (l0.width, l0.height)
+    }
+
+    #[getter]
+    fn level_downsamples(&self) -> Vec<f64> {
+        self.slide_info
+            .levels
+            .iter()
+            .map(|l| l.downsample)
+            .collect()
+    }
+
+    fn level_dimensions(&self, level: usize) -> PyResult<(u64, u64)> {
+        if level >= self.slide_info.levels.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Level {} out of range (max {})",
+                level,
+                self.slide_info.levels.len() - 1
+            )));
+        }
+        let lvl = &self.slide_info.levels[level];
+        Ok((lvl.width, lvl.height))
+    }
+
+    #[getter]
+    fn associated_images(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.tile_index.associated_images.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    fn read_associated_image<'py>(
+        &self,
+        py: Python<'py>,
+        name: &str,
+    ) -> PyResult<Bound<'py, PyArray3<u8>>> {
+        let entry = self.tile_index.associated_images.get(name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "No associated image '{}'. Available: {:?}",
+                name,
+                self.tile_index.associated_images.keys().collect::<Vec<_>>()
+            ))
+        })?;
+
+        let (pixels, w, h) = self
+            .decoder
+            .decode_tile(entry)
+            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
+        let arr = Array3::from_shape_vec((h, w, 3), pixels).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Array shape error: {}", e))
+        })?;
+        Ok(arr.into_pyarray_bound(py))
     }
 
     fn tile_count(&self, level: usize) -> PyResult<usize> {

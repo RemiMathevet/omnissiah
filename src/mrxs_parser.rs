@@ -4,6 +4,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum ImageFormat {
     Jpeg,
     Png,
@@ -11,6 +12,7 @@ pub enum ImageFormat {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct LevelInfo {
     pub tile_w: u32,
     pub tile_h: u32,
@@ -28,6 +30,7 @@ pub struct LevelInfo {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct SlideInfo {
     pub slide_id: String,
     pub images_x: u32,
@@ -37,6 +40,7 @@ pub struct SlideInfo {
     pub levels: Vec<LevelInfo>,
     pub data_file_paths: Vec<PathBuf>,
     pub index_file_path: PathBuf,
+    pub associated_image_records: Vec<NonHierRecord>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -48,6 +52,13 @@ pub struct TileEntry {
 
 pub struct TileIndex {
     pub levels: Vec<HashMap<(u32, u32), TileEntry>>,
+    pub associated_images: HashMap<String, TileEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NonHierRecord {
+    pub name: String,
+    pub record_no: i32,
 }
 
 type IniData = HashMap<String, HashMap<String, String>>;
@@ -64,13 +75,12 @@ fn parse_ini(content: &str) -> IniData {
         }
         if line.starts_with('[') && line.ends_with(']') {
             current_section = line[1..line.len() - 1].to_string();
-            data.entry(current_section.clone())
-                .or_insert_with(HashMap::new);
+            data.entry(current_section.clone()).or_default();
         } else if let Some(eq_pos) = line.find('=') {
             let key = line[..eq_pos].trim().to_string();
             let value = line[eq_pos + 1..].trim().to_string();
             data.entry(current_section.clone())
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .insert(key, value);
         }
     }
@@ -97,17 +107,15 @@ fn get_ini_f64(ini: &IniData, section: &str, key: &str) -> Result<f64, String> {
 }
 
 pub fn parse_slidedat(mrxs_path: &Path) -> Result<SlideInfo, String> {
-    let path_str = mrxs_path
-        .to_str()
-        .ok_or("Invalid path encoding")?;
+    let path_str = mrxs_path.to_str().ok_or("Invalid path encoding")?;
     if !path_str.to_lowercase().ends_with(".mrxs") {
         return Err("File does not have .mrxs extension".into());
     }
 
     let dirname = PathBuf::from(&path_str[..path_str.len() - 5]);
     let slidedat_path = dirname.join("Slidedat.ini");
-    let content =
-        fs::read_to_string(&slidedat_path).map_err(|e| format!("Cannot read Slidedat.ini: {}", e))?;
+    let content = fs::read_to_string(&slidedat_path)
+        .map_err(|e| format!("Cannot read Slidedat.ini: {}", e))?;
     let ini = parse_ini(&content);
 
     let slide_id = get_ini_str(&ini, "GENERAL", "SLIDE_ID")?.to_string();
@@ -163,8 +171,7 @@ pub fn parse_slidedat(mrxs_path: &Path) -> Result<SlideInfo, String> {
     let base_w = images_x as u64 * tile_w_0 as u64;
     let base_h = images_y as u64 * tile_h_0 as u64;
 
-    for i in 0..zoom_levels as usize {
-        let sec = &section_names[i];
+    for sec in section_names.iter().take(zoom_levels as usize) {
         let concat_exp = get_ini_u32(&ini, sec, "IMAGE_CONCAT_FACTOR")?;
         total_concat_exponent += concat_exp;
         let image_concat = 1u32 << total_concat_exponent;
@@ -184,8 +191,8 @@ pub fn parse_slidedat(mrxs_path: &Path) -> Result<SlideInfo, String> {
             other => return Err(format!("Unsupported image format: {}", other)),
         };
 
-        let tiles_x = (images_x + image_concat - 1) / image_concat;
-        let tiles_y = (images_y + image_concat - 1) / image_concat;
+        let tiles_x = images_x.div_ceil(image_concat);
+        let tiles_y = images_y.div_ceil(image_concat);
         let downsample = image_concat as f64;
         let width = base_w / image_concat as u64;
         let height = base_h / image_concat as u64;
@@ -207,6 +214,8 @@ pub fn parse_slidedat(mrxs_path: &Path) -> Result<SlideInfo, String> {
         });
     }
 
+    let associated_image_records = parse_nonhier_associated_images(&ini);
+
     Ok(SlideInfo {
         slide_id,
         images_x,
@@ -216,7 +225,98 @@ pub fn parse_slidedat(mrxs_path: &Path) -> Result<SlideInfo, String> {
         levels,
         data_file_paths,
         index_file_path: dirname.join(index_filename),
+        associated_image_records,
     })
+}
+
+fn parse_nonhier_associated_images(ini: &IniData) -> Vec<NonHierRecord> {
+    let nonhier_count = match ini
+        .get("HIERARCHICAL")
+        .and_then(|s| s.get("NONHIER_COUNT"))
+        .and_then(|v| v.parse::<u32>().ok())
+    {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+
+    let hier_count = ini
+        .get("HIERARCHICAL")
+        .and_then(|s| s.get("HIER_COUNT"))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    let targets = [
+        ("ScanDataLayer_SlideThumbnail", "macro"),
+        ("ScanDataLayer_SlideBarcode", "label"),
+        ("ScanDataLayer_SlidePreview", "thumbnail"),
+    ];
+
+    let mut records = Vec::new();
+
+    for &(target_value, output_name) in &targets {
+        if let Some(record_no) = get_nonhier_val_offset(
+            ini,
+            nonhier_count,
+            hier_count,
+            "Scan data layer",
+            target_value,
+        ) {
+            records.push(NonHierRecord {
+                name: output_name.to_string(),
+                record_no,
+            });
+        }
+    }
+
+    records
+}
+
+fn get_nonhier_val_offset(
+    ini: &IniData,
+    nonhier_count: u32,
+    hier_count: u32,
+    target_name: &str,
+    target_value: &str,
+) -> Option<i32> {
+    let hier_section = ini.get("HIERARCHICAL")?;
+
+    let mut offset: i32 = 0;
+    let mut found_index: Option<u32> = None;
+    let mut found_count: u32 = 0;
+
+    // Accumulate hier level counts first: each hier contributes 1 to the record numbering
+    for i in 0..hier_count {
+        let count_key = format!("HIER_{}_COUNT", i);
+        let _count = hier_section.get(&count_key)?.parse::<u32>().ok()?;
+    }
+
+    // Now iterate nonhier groups
+    for i in 0..nonhier_count {
+        let name_key = format!("NONHIER_{}_NAME", i);
+        let name = hier_section.get(&name_key)?;
+        let count_key = format!("NONHIER_{}_COUNT", i);
+        let count = hier_section.get(&count_key)?.parse::<u32>().ok()?;
+
+        if name == target_name {
+            found_index = Some(i);
+            found_count = count;
+            break;
+        }
+        offset += count as i32;
+    }
+
+    let name_index = found_index?;
+
+    for i in 0..found_count {
+        let val_key = format!("NONHIER_{}_VAL_{}", name_index, i);
+        let val = hier_section.get(&val_key)?;
+        if val == target_value {
+            return Some(offset);
+        }
+        offset += 1;
+    }
+
+    None
 }
 
 fn read_le_i32(f: &mut fs::File) -> Result<i32, String> {
@@ -271,8 +371,10 @@ pub fn parse_index(slide_info: &SlideInfo) -> Result<TileIndex, String> {
 
     let mut seek_location = root_ptr as u64;
 
-    for zoom_level in 0..zoom_levels {
-        let image_concat = slide_info.levels[zoom_level].image_concat;
+    for (zoom_level, (slide_level, level_map)) in
+        slide_info.levels.iter().zip(levels.iter_mut()).enumerate()
+    {
+        let image_concat = slide_level.image_concat;
 
         f.seek(SeekFrom::Start(seek_location))
             .map_err(|e| format!("Cannot seek to level {} pointer: {}", zoom_level, e))?;
@@ -295,7 +397,10 @@ pub fn parse_index(slide_info: &SlideInfo) -> Result<TileIndex, String> {
 
         let data_ptr = read_le_i32(&mut f)?;
         if data_ptr < 0 {
-            return Err(format!("Invalid data page pointer for level {}", zoom_level));
+            return Err(format!(
+                "Invalid data page pointer for level {}",
+                zoom_level
+            ));
         }
 
         f.seek(SeekFrom::Start(data_ptr as u64))
@@ -324,7 +429,7 @@ pub fn parse_index(slide_info: &SlideInfo) -> Result<TileIndex, String> {
                 let tile_col = x / image_concat;
                 let tile_row = y / image_concat;
 
-                levels[zoom_level].insert(
+                level_map.insert(
                     (tile_col, tile_row),
                     TileEntry {
                         fileno: fileno as u32,
@@ -342,5 +447,98 @@ pub fn parse_index(slide_info: &SlideInfo) -> Result<TileIndex, String> {
         seek_location += 4;
     }
 
-    Ok(TileIndex { levels })
+    let nonhier_root = hier_root + 4;
+    let mut associated_images = HashMap::new();
+    for record in &slide_info.associated_image_records {
+        match read_nonhier_record(&mut f, nonhier_root, record.record_no) {
+            Ok(entry) => {
+                associated_images.insert(record.name.clone(), entry);
+            }
+            Err(e) => {
+                eprintln!(
+                    "[omnissiah] Warning: cannot read associated image '{}': {}",
+                    record.name, e
+                );
+            }
+        }
+    }
+
+    Ok(TileIndex {
+        levels,
+        associated_images,
+    })
+}
+
+fn read_nonhier_record(
+    f: &mut fs::File,
+    nonhier_root: u64,
+    record_no: i32,
+) -> Result<TileEntry, String> {
+    f.seek(SeekFrom::Start(nonhier_root))
+        .map_err(|e| format!("Cannot seek to nonhier root: {}", e))?;
+
+    let ptr = read_le_i32(f)?;
+    if ptr < 0 {
+        return Err("Invalid nonhier root pointer".into());
+    }
+
+    f.seek(SeekFrom::Start(ptr as u64 + 4 * record_no as u64))
+        .map_err(|e| format!("Cannot seek to nonhier record pointer: {}", e))?;
+
+    let record_ptr = read_le_i32(f)?;
+    if record_ptr < 0 {
+        return Err("Invalid nonhier record pointer".into());
+    }
+
+    f.seek(SeekFrom::Start(record_ptr as u64))
+        .map_err(|e| format!("Cannot seek to nonhier record: {}", e))?;
+
+    let zero = read_le_i32(f)?;
+    if zero != 0 {
+        return Err(format!(
+            "Expected 0 at start of nonhier data page, got {}",
+            zero
+        ));
+    }
+
+    let data_ptr = read_le_i32(f)?;
+    if data_ptr < 0 {
+        return Err("Invalid nonhier data page pointer".into());
+    }
+
+    f.seek(SeekFrom::Start(data_ptr as u64))
+        .map_err(|e| format!("Cannot seek to nonhier data page: {}", e))?;
+
+    let page_len = read_le_i32(f)?;
+    if page_len < 1 {
+        return Err("Expected at least one data item in nonhier record".into());
+    }
+
+    // next_ptr, two zeros
+    let _next_ptr = read_le_i32(f)?;
+    let z1 = read_le_i32(f)?;
+    let z2 = read_le_i32(f)?;
+    if z1 != 0 || z2 != 0 {
+        return Err(format!(
+            "Expected zeros in nonhier data page header, got {} {}",
+            z1, z2
+        ));
+    }
+
+    let position = read_le_i32(f)?;
+    let size = read_le_i32(f)?;
+    let fileno = read_le_i32(f)?;
+
+    if position < 0 || size <= 0 || fileno < 0 {
+        return Err(format!(
+            "Invalid nonhier record values: position={}, size={}, fileno={}",
+            position, size, fileno
+        ));
+    }
+
+    Ok(TileEntry {
+        fileno: fileno as u32,
+        offset: position as u64,
+        length: size as u32,
+    })
 }
