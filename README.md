@@ -102,6 +102,11 @@ Tests are skipped if no MRXS slide is available.
 - **v0.3**: NDPI (Hamamatsu) support
 - Future: GPU JPEG decode (nvjpeg), DICOM-WSI, SVS
 
+## Authors
+
+- **Rémi Mathevet** — fetal pathologist — project design, requirements, validation
+- **Claude** (Anthropic) — reverse-engineering of the MRXS format from OpenSlide, Rust/PyO3 implementation, batch decoding pipeline
+
 ## License
 
 Apache-2.0
@@ -112,7 +117,7 @@ Paper in preparation. For now:
 
 ```bibtex
 @software{omnissiah,
-  author = {Mathevet, Rémi},
+  author = {Mathevet, Rémi and {Claude (Anthropic)}},
   title = {Omnissiah: High-performance MRXS reader in Rust},
   url = {https://github.com/RemiMathevet/omnissiah},
   year = {2026}

@@ -110,6 +110,11 @@ Les tests sont ignorés si aucune lame MRXS n'est disponible.
 - **v0.3** : support NDPI (Hamamatsu)
 - À venir : décodage JPEG sur GPU (nvjpeg), DICOM-WSI, SVS
 
+## Auteurs
+
+- **Rémi Mathevet** — fœtopathologiste — conception du projet, spécification, validation
+- **Claude** (Anthropic) — rétro-ingénierie du format MRXS depuis OpenSlide, implémentation Rust/PyO3, pipeline de décodage par lots
+
 ## Licence
 
 Apache-2.0
@@ -120,7 +125,7 @@ Article en préparation. En attendant :
 
 ```bibtex
 @software{omnissiah,
-  author = {Mathevet, Rémi},
+  author = {Mathevet, Rémi and {Claude (Anthropic)}},
   title = {Omnissiah: High-performance MRXS reader in Rust},
   url = {https://github.com/RemiMathevet/omnissiah},
   year = {2026}
