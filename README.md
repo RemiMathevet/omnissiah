@@ -1,3 +1,5 @@
+***English** | [Français](README.fr.md)*
+
 # Omnissiah
 
 High-performance MRXS whole slide image reader in Rust with Python bindings.
