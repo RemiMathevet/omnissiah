@@ -18,6 +18,8 @@ struct MrxsReader {
     slide_info: SlideInfo,
     tile_index: TileIndex,
     decoder: TileDecoder,
+    /// Niveaux dont au moins une tuile pointe vers un `Data*.dat` absent (lame tronquée).
+    level_missing: Vec<bool>,
 }
 
 #[pymethods]
@@ -29,8 +31,16 @@ impl MrxsReader {
             parse_slidedat(&mrxs_path).map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
         let tile_index =
             parse_index(&slide_info).map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
-        let decoder = TileDecoder::new(&slide_info.data_file_paths)
-            .map_err(PyErr::new::<pyo3::exceptions::PyIOError, _>)?;
+        let decoder = TileDecoder::new(&slide_info.data_file_paths);
+
+        // Un niveau est amputé dès qu'UNE de ses tuiles pointe vers un fichier absent : les
+        // scans multi-plans de focale étalent un niveau sur deux Data*.dat, en perdre un seul
+        // suffit à trouer l'image.
+        let level_missing: Vec<bool> = tile_index
+            .levels
+            .iter()
+            .map(|lv| lv.values().any(|e| !decoder.has_file(e.fileno)))
+            .collect();
 
         let total_tiles: usize = tile_index.levels.iter().map(|l| l.len()).sum();
         eprintln!(
@@ -39,12 +49,47 @@ impl MrxsReader {
             slide_info.levels.len(),
             total_tiles
         );
+        if !decoder.missing_files().is_empty() {
+            let amputes: Vec<usize> = level_missing
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| **m)
+                .map(|(i, _)| i)
+                .collect();
+            eprintln!(
+                "[omnissiah] LAME TRONQUÉE — Data*.dat absents {:?}, niveaux indisponibles {:?} ; \
+                 viser un mpp, pas un numéro de niveau",
+                decoder.missing_files(),
+                amputes
+            );
+        }
 
         Ok(Self {
             slide_info,
             tile_index,
             decoder,
+            level_missing,
         })
+    }
+
+    /// Erreur explicite plutôt que des tuiles noires : un niveau amputé qui rendrait du noir
+    /// produirait des embeddings « réussis » sur du vide.
+    fn check_level(&self, level: usize) -> PyResult<()> {
+        if level >= self.slide_info.levels.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Level {} out of range (max {})",
+                level,
+                self.slide_info.levels.len() - 1
+            )));
+        }
+        if self.level_missing[level] {
+            return Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
+                "Level {} indisponible : son Data*.dat a été supprimé (lame tronquée). \
+                 Viser un mpp via level_downsamples, pas un numéro de niveau.",
+                level
+            )));
+        }
+        Ok(())
     }
 
     fn slide_info<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
@@ -60,6 +105,7 @@ impl MrxsReader {
         dict.set_item("tile_w", l0.tile_w)?;
         dict.set_item("tile_h", l0.tile_h)?;
         dict.set_item("level_count", info.levels.len())?;
+        dict.set_item("missing_data_files", self.decoder.missing_files().to_vec())?;
 
         let levels_list: Vec<_> = info
             .levels
@@ -68,6 +114,7 @@ impl MrxsReader {
             .map(|(i, level)| {
                 let d = PyDict::new_bound(py);
                 d.set_item("level", i).unwrap();
+                d.set_item("available", !self.level_missing[i]).unwrap();
                 d.set_item("width", level.width).unwrap();
                 d.set_item("height", level.height).unwrap();
                 d.set_item("tile_w", level.tile_w).unwrap();
@@ -92,13 +139,7 @@ impl MrxsReader {
         y: u32,
         level: usize,
     ) -> PyResult<Bound<'py, PyArray3<u8>>> {
-        if level >= self.slide_info.levels.len() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Level {} out of range (max {})",
-                level,
-                self.slide_info.levels.len() - 1
-            )));
-        }
+        self.check_level(level)?;
 
         let lvl = &self.slide_info.levels[level];
 
@@ -132,13 +173,7 @@ impl MrxsReader {
         level: usize,
         resize: Option<u32>,
     ) -> PyResult<Bound<'py, PyArray4<u8>>> {
-        if level >= self.slide_info.levels.len() {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Level {} out of range (max {})",
-                level,
-                self.slide_info.levels.len() - 1
-            )));
-        }
+        self.check_level(level)?;
 
         let coords = coords.as_array();
         let n = coords.shape()[0];

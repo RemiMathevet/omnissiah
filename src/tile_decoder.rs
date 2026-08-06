@@ -7,28 +7,48 @@ use turbojpeg::{Decompressor, Image, PixelFormat};
 use crate::mrxs_parser::TileEntry;
 
 pub struct TileDecoder {
-    mmaps: Vec<Mmap>,
+    mmaps: Vec<Option<Mmap>>,
+    missing: Vec<usize>,
 }
 
 impl TileDecoder {
-    pub fn new(data_file_paths: &[PathBuf]) -> Result<Self, String> {
+    /// Un `Data*.dat` absent ne fait PAS échouer l'ouverture.
+    ///
+    /// Chaque niveau de zoom MIRAX vit dans son propre `Data*.dat`, et un tier d'archive
+    /// supprime celui du niveau 0 (~69 % du poids). OpenSlide ouvre paresseusement et lit
+    /// donc ces lames sans broncher ; indexer tout à l'ouverture les rendait illisibles ici.
+    /// Les fichiers manquants sont mémorisés, pas avalés : `has_file` permet à l'appelant
+    /// de refuser un niveau amputé au lieu de servir du noir.
+    pub fn new(data_file_paths: &[PathBuf]) -> Self {
         let mut mmaps = Vec::with_capacity(data_file_paths.len());
-        for path in data_file_paths {
-            let file =
-                File::open(path).map_err(|e| format!("Cannot open {}: {}", path.display(), e))?;
-            let mmap = unsafe {
-                Mmap::map(&file).map_err(|e| format!("Cannot mmap {}: {}", path.display(), e))?
-            };
-            mmaps.push(mmap);
+        let mut missing = Vec::new();
+        for (i, path) in data_file_paths.iter().enumerate() {
+            match File::open(path).and_then(|f| unsafe { Mmap::map(&f) }) {
+                Ok(m) => mmaps.push(Some(m)),
+                Err(_) => {
+                    mmaps.push(None);
+                    missing.push(i);
+                }
+            }
         }
-        Ok(Self { mmaps })
+        Self { mmaps, missing }
+    }
+
+    pub fn missing_files(&self) -> &[usize] {
+        &self.missing
+    }
+
+    pub fn has_file(&self, fileno: u32) -> bool {
+        matches!(self.mmaps.get(fileno as usize), Some(Some(_)))
     }
 
     pub fn get_jpeg_data(&self, entry: &TileEntry) -> Result<&[u8], String> {
         let mmap = self
             .mmaps
             .get(entry.fileno as usize)
-            .ok_or_else(|| format!("Invalid fileno {}", entry.fileno))?;
+            .ok_or_else(|| format!("Invalid fileno {}", entry.fileno))?
+            .as_ref()
+            .ok_or_else(|| format!("Data file {} absent (lame tronquée)", entry.fileno))?;
         let start = entry.offset as usize;
         let end = start + entry.length as usize;
         if end > mmap.len() {
@@ -132,4 +152,40 @@ fn resize_rgb(pixels: &[u8], src_w: usize, src_h: usize, target_size: usize) -> 
     );
 
     resized.into_raw()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_data_file_is_tolerated_not_fatal() {
+        let dir = std::env::temp_dir().join("omnissiah_tile_decoder_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let present = dir.join("Data0000.dat");
+        std::fs::write(&present, b"pas du jpeg, on ne decode pas ici").unwrap();
+        let absent = dir.join("Data0001.dat");
+        let _ = std::fs::remove_file(&absent);
+
+        let d = TileDecoder::new(&[present, absent]);
+        assert_eq!(d.missing_files(), &[1]);
+        assert!(d.has_file(0));
+        assert!(!d.has_file(1)); // absent
+        assert!(!d.has_file(9)); // hors bornes
+
+        // une tuile qui pointe vers le fichier absent échoue explicitement, sans panique
+        let e = TileEntry {
+            fileno: 1,
+            offset: 0,
+            length: 4,
+        };
+        assert!(d.get_jpeg_data(&e).unwrap_err().contains("absent"));
+        // le fichier présent reste lisible
+        let ok = TileEntry {
+            fileno: 0,
+            offset: 0,
+            length: 4,
+        };
+        assert_eq!(d.get_jpeg_data(&ok).unwrap(), b"pas ");
+    }
 }
