@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: [master, main]
+    tags: ["v*"]
+  workflow_dispatch:
   pull_request:
     branches: [master, main]
 
@@ -62,3 +64,54 @@ jobs:
         run: |
           pip install target/wheels/*.whl
           python -c "from omnissiah import MrxsReader; print('import OK')"
+
+  windows:
+    name: Windows wheel (win_amd64)
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      # libjpeg-turbo compilé depuis ses sources (pas de pkg-config sous Windows)
+      TURBOJPEG_SOURCE: vendor
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/setup-nasm@v1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build wheel
+        run: maturin build --release -i python
+
+      - name: Install and smoke test
+        run: |
+          pip install target/wheels/*.whl
+          python -c "from omnissiah import MrxsReader; print('import OK')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omnissiah-win_amd64
+          path: target/wheels/*.whl
+
+      # Sur un tag v* : la roue part en release, d'où la distribution Windows
+      # de Lumi (FoetoPath_Luminarium_V2/windows/release_windows.sh) la tire.
+      - name: Publish on release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Roues Python de omnissiah."
+          gh release upload "$GITHUB_REF_NAME" target/wheels/*.whl --clobber
