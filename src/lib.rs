@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use numpy::ndarray::{Array3, Array4};
 use numpy::{IntoPyArray, PyArray3, PyArray4, PyReadonlyArray2};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBytes, PyDict};
+use rayon::prelude::*;
+use turbojpeg::{Compressor, Image, PixelFormat, Subsamp};
 
 use mrxs_parser::{parse_index, parse_slidedat, SlideInfo, TileIndex};
 use tile_decoder::TileDecoder;
@@ -330,6 +332,127 @@ impl MrxsReader {
         let mut coords: Vec<_> = self.tile_index.levels[level].keys().copied().collect();
         coords.sort();
         Ok(coords)
+    }
+}
+
+/// Encodeur JPEG baseline : qualité, 4:2:2 (YBR_FULL_422 en DICOM), Huffman optimisé ou non.
+fn jpeg(buf: &[u8], w: usize, h: usize, quality: i32, optimize: bool) -> Result<Vec<u8>, String> {
+    let mut c = Compressor::new().map_err(|e| e.to_string())?;
+    c.set_quality(quality).map_err(|e| e.to_string())?;
+    c.set_subsamp(Subsamp::Sub2x1).map_err(|e| e.to_string())?;
+    c.set_optimize(optimize).map_err(|e| e.to_string())?;
+    let img = Image {
+        pixels: buf,
+        width: w,
+        pitch: w * 3,
+        height: h,
+        format: PixelFormat::RGB,
+    };
+    c.compress_to_vec(img).map_err(|e| e.to_string())
+}
+
+impl MrxsReader {
+    /// Une tuile de sortie `t` x `t` dont le coin est (x0, y0) en pixels du niveau : tuiles MIRAX
+    /// décodées et recopiées, FOND BLANC (ce qu'OpenSlide rend pour le non numérisé) et blanc
+    /// au-delà de (end_x, end_y) — la zone utile. `None` si aucune tuile MIRAX ne la touche.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        &self,
+        level: usize,
+        x0: i64,
+        y0: i64,
+        t: usize,
+        end_x: i64,
+        end_y: i64,
+    ) -> Option<Vec<u8>> {
+        let lvl = &self.slide_info.levels[level];
+        let (tw, th) = (lvl.tile_w as i64, lvl.tile_h as i64);
+        let (x1, y1) = ((x0 + t as i64).min(end_x), (y0 + t as i64).min(end_y));
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let mut buf: Option<Vec<u8>> = None;
+        for ty in y0.div_euclid(th)..=((y1 - 1).div_euclid(th)) {
+            for tx in x0.div_euclid(tw)..=((x1 - 1).div_euclid(tw)) {
+                if tx < 0 || ty < 0 {
+                    continue;
+                }
+                let Some(e) = self.tile_index.levels[level].get(&(tx as u32, ty as u32)) else {
+                    continue;
+                };
+                let Ok((px, w, h)) = self.decoder.decode_tile(e) else {
+                    continue;
+                };
+                let b = buf.get_or_insert_with(|| vec![255u8; t * t * 3]);
+                // intersection de la tuile MIRAX avec la tuile de sortie et la zone utile
+                let (ax, ay) = (tx * tw, ty * th);
+                let (cx0, cy0) = (ax.max(x0), ay.max(y0));
+                let (cx1, cy1) = ((ax + w as i64).min(x1), (ay + h as i64).min(y1));
+                if cx1 <= cx0 || cy1 <= cy0 {
+                    continue;
+                }
+                let n = ((cx1 - cx0) * 3) as usize;
+                for yy in cy0..cy1 {
+                    let src = (((yy - ay) as usize) * w + (cx0 - ax) as usize) * 3;
+                    let dst = (((yy - y0) as usize) * t + (cx0 - x0) as usize) * 3;
+                    b[dst..dst + n].copy_from_slice(&px[src..src + n]);
+                }
+            }
+        }
+        buf
+    }
+}
+
+#[pymethods]
+impl MrxsReader {
+    /// Grille `ncols` x `nrows` de tuiles `tile` x `tile` du niveau `level`, coin (x0, y0) en
+    /// pixels du niveau, encodées en JPEG baseline 4:2:2 (ordre ligne par ligne). Tout en Rust,
+    /// en parallèle (rayon), sans le GIL : lecture, assemblage, fond blanc, encodage. Les tuiles
+    /// vides partagent UNE tuile blanche encodée. Fait pour le convertisseur MIRAX -> DICOM.
+    #[pyo3(signature = (level, x0, y0, ncols, nrows, tile=1024, quality=80, optimize=true,
+                        end_x=i64::MAX, end_y=i64::MAX))]
+    #[allow(clippy::too_many_arguments)]
+    fn encode_tiles<'py>(
+        &self,
+        py: Python<'py>,
+        level: usize,
+        x0: i64,
+        y0: i64,
+        ncols: usize,
+        nrows: usize,
+        tile: usize,
+        quality: i32,
+        optimize: bool,
+        end_x: i64,
+        end_y: i64,
+    ) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+        self.check_level(level)?;
+        let err = |e: String| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e);
+        let out: Result<Vec<Vec<u8>>, String> = py.allow_threads(|| {
+            let blanc = jpeg(&vec![255u8; tile * tile * 3], tile, tile, quality, optimize)?;
+            (0..ncols * nrows)
+                .into_par_iter()
+                .map(|k| {
+                    let (c, r) = ((k % ncols) as i64, (k / ncols) as i64);
+                    match self.assemble(
+                        level,
+                        x0 + c * tile as i64,
+                        y0 + r * tile as i64,
+                        tile,
+                        end_x,
+                        end_y,
+                    ) {
+                        Some(b) => jpeg(&b, tile, tile, quality, optimize),
+                        None => Ok(blanc.clone()),
+                    }
+                })
+                .collect()
+        });
+        Ok(out
+            .map_err(err)?
+            .iter()
+            .map(|v| PyBytes::new_bound(py, v))
+            .collect())
     }
 }
 

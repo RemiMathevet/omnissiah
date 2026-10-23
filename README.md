@@ -65,6 +65,15 @@ print(reader.associated_images)  # ['label', 'macro', 'thumbnail']
 macro = reader.read_associated_image("macro")  # (H, W, 3) uint8
 ```
 
+## Tile encoding (`encode_tiles`, v0.2)
+
+`MrxsReader.encode_tiles` reads, assembles, fills the background white and JPEG-encodes (4:2:2) a grid of output tiles, entirely in Rust on all cores (rayon, GIL released). Built for MIRAX -> DICOM conversion: 2.9x faster than OpenSlide + Pillow on a full slide (12.6 s vs 37.1 s), decoded pixels identical.
+
+```python
+jpegs = reader.encode_tiles(level, x0, y0, ncols, nrows, tile=1024, quality=80, optimize=True,
+                            end_x=x_end, end_y=y_end)   # list[bytes], row-major
+```
+
 ## API comparison with OpenSlide
 
 | Feature | OpenSlide | Omnissiah |

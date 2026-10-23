@@ -1,6 +1,6 @@
 [package]
 name = "omnissiah"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -8,7 +8,7 @@ name = "omnissiah"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { version = "0.22", features = ["extension-module", "multiple-pymethods"] }
 numpy = "0.22"
 rayon = "1.10"
 turbojpeg = { version = "1", default-features = false, features = ["cmake", "pkg-config", "require-simd"] }

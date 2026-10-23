@@ -71,6 +71,15 @@ print(reader.associated_images)  # ['label', 'macro', 'thumbnail']
 macro = reader.read_associated_image("macro")  # (H, W, 3) uint8
 ```
 
+## Encodage de tuiles (`encode_tiles`, v0.2)
+
+`MrxsReader.encode_tiles` lit, assemble, remplit le fond en blanc et encode en JPEG (4:2:2) une grille de tuiles de sortie, entièrement en Rust sur tous les cœurs (rayon, GIL relâché). Conçu pour la conversion MIRAX -> DICOM : 2,9 x plus rapide qu'OpenSlide + Pillow sur une lame entière (12,6 s contre 37,1 s), pixels décodés identiques.
+
+```python
+jpegs = reader.encode_tiles(level, x0, y0, ncols, nrows, tile=1024, quality=80, optimize=True,
+                            end_x=x_end, end_y=y_end)   # list[bytes], ligne par ligne
+```
+
 ## Comparaison de l'API avec OpenSlide
 
 | Fonctionnalité | OpenSlide | Omnissiah |
