@@ -1,7 +1,10 @@
 #![allow(clippy::useless_conversion)]
 
+mod dicom;
 mod mrxs_parser;
+mod tiff;
 mod tile_decoder;
+mod wsi;
 
 use std::path::PathBuf;
 
@@ -336,7 +339,13 @@ impl MrxsReader {
 }
 
 /// Encodeur JPEG baseline : qualité, 4:2:2 (YBR_FULL_422 en DICOM), Huffman optimisé ou non.
-fn jpeg(buf: &[u8], w: usize, h: usize, quality: i32, optimize: bool) -> Result<Vec<u8>, String> {
+pub(crate) fn jpeg(
+    buf: &[u8],
+    w: usize,
+    h: usize,
+    quality: i32,
+    optimize: bool,
+) -> Result<Vec<u8>, String> {
     let mut c = Compressor::new().map_err(|e| e.to_string())?;
     c.set_quality(quality).map_err(|e| e.to_string())?;
     c.set_subsamp(Subsamp::Sub2x1).map_err(|e| e.to_string())?;
@@ -351,11 +360,79 @@ fn jpeg(buf: &[u8], w: usize, h: usize, quality: i32, optimize: bool) -> Result<
     c.compress_to_vec(img).map_err(|e| e.to_string())
 }
 
+/// Une fenêtre `ow` x `oh` dont le coin est (x0, y0) en pixels du niveau, recopiée depuis une
+/// grille de tuiles source `tw` x `th` (`source(tx, ty)` = pixels RGB décodés, largeur, hauteur) :
+/// FOND BLANC (ce qu'OpenSlide rend pour le non numérisé) et blanc au-delà de (end_x, end_y) — la
+/// zone utile. `None` si aucune tuile source ne la touche. Commun à tous les formats.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_grid(
+    x0: i64,
+    y0: i64,
+    ow: usize,
+    oh: usize,
+    end_x: i64,
+    end_y: i64,
+    tw: i64,
+    th: i64,
+    source: impl Fn(u32, u32) -> Option<(Vec<u8>, usize, usize)> + Sync,
+) -> Option<Vec<u8>> {
+    let (x1, y1) = ((x0 + ow as i64).min(end_x), (y0 + oh as i64).min(end_y));
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    // tuiles touchées, décodées en parallèle (rayon ; imbriqué sans souci dans encode_grid)
+    let liste: Vec<(i64, i64)> = (y0.div_euclid(th)..=((y1 - 1).div_euclid(th)))
+        .flat_map(|ty| (x0.div_euclid(tw)..=((x1 - 1).div_euclid(tw))).map(move |tx| (tx, ty)))
+        .filter(|&(tx, ty)| tx >= 0 && ty >= 0)
+        .collect();
+    let tuiles: Vec<_> = liste
+        .par_iter()
+        .map(|&(tx, ty)| source(tx as u32, ty as u32))
+        .collect();
+    let mut buf: Option<Vec<u8>> = None;
+    for (&(tx, ty), t) in liste.iter().zip(tuiles) {
+        {
+            let Some((px, w, h)) = t else { continue };
+            let b = buf.get_or_insert_with(|| vec![255u8; ow * oh * 3]);
+            // intersection de la tuile source avec la tuile de sortie et la zone utile
+            let (ax, ay) = (tx * tw, ty * th);
+            let (cx0, cy0) = (ax.max(x0), ay.max(y0));
+            let (cx1, cy1) = ((ax + w as i64).min(x1), (ay + h as i64).min(y1));
+            if cx1 <= cx0 || cy1 <= cy0 {
+                continue;
+            }
+            let n = ((cx1 - cx0) * 3) as usize;
+            for yy in cy0..cy1 {
+                let src = (((yy - ay) as usize) * w + (cx0 - ax) as usize) * 3;
+                let dst = (((yy - y0) as usize) * ow + (cx0 - x0) as usize) * 3;
+                b[dst..dst + n].copy_from_slice(&px[src..src + n]);
+            }
+        }
+    }
+    buf
+}
+
+/// Grille `ncols` x `nrows` de tuiles `tile` x `tile` encodées en JPEG baseline 4:2:2, en parallèle ;
+/// les tuiles vides (`assemble` rend `None`) partagent UNE tuile blanche encodée.
+pub(crate) fn encode_grid(
+    ncols: usize,
+    nrows: usize,
+    tile: usize,
+    quality: i32,
+    optimize: bool,
+    assemble: impl Fn(i64, i64) -> Option<Vec<u8>> + Sync,
+) -> Result<Vec<Vec<u8>>, String> {
+    let blanc = jpeg(&vec![255u8; tile * tile * 3], tile, tile, quality, optimize)?;
+    (0..ncols * nrows)
+        .into_par_iter()
+        .map(|k| match assemble((k % ncols) as i64, (k / ncols) as i64) {
+            Some(b) => jpeg(&b, tile, tile, quality, optimize),
+            None => Ok(blanc.clone()),
+        })
+        .collect()
+}
+
 impl MrxsReader {
-    /// Une tuile de sortie `t` x `t` dont le coin est (x0, y0) en pixels du niveau : tuiles MIRAX
-    /// décodées et recopiées, FOND BLANC (ce qu'OpenSlide rend pour le non numérisé) et blanc
-    /// au-delà de (end_x, end_y) — la zone utile. `None` si aucune tuile MIRAX ne la touche.
-    #[allow(clippy::too_many_arguments)]
     fn assemble(
         &self,
         level: usize,
@@ -366,40 +443,21 @@ impl MrxsReader {
         end_y: i64,
     ) -> Option<Vec<u8>> {
         let lvl = &self.slide_info.levels[level];
-        let (tw, th) = (lvl.tile_w as i64, lvl.tile_h as i64);
-        let (x1, y1) = ((x0 + t as i64).min(end_x), (y0 + t as i64).min(end_y));
-        if x1 <= x0 || y1 <= y0 {
-            return None;
-        }
-        let mut buf: Option<Vec<u8>> = None;
-        for ty in y0.div_euclid(th)..=((y1 - 1).div_euclid(th)) {
-            for tx in x0.div_euclid(tw)..=((x1 - 1).div_euclid(tw)) {
-                if tx < 0 || ty < 0 {
-                    continue;
-                }
-                let Some(e) = self.tile_index.levels[level].get(&(tx as u32, ty as u32)) else {
-                    continue;
-                };
-                let Ok((px, w, h)) = self.decoder.decode_tile(e) else {
-                    continue;
-                };
-                let b = buf.get_or_insert_with(|| vec![255u8; t * t * 3]);
-                // intersection de la tuile MIRAX avec la tuile de sortie et la zone utile
-                let (ax, ay) = (tx * tw, ty * th);
-                let (cx0, cy0) = (ax.max(x0), ay.max(y0));
-                let (cx1, cy1) = ((ax + w as i64).min(x1), (ay + h as i64).min(y1));
-                if cx1 <= cx0 || cy1 <= cy0 {
-                    continue;
-                }
-                let n = ((cx1 - cx0) * 3) as usize;
-                for yy in cy0..cy1 {
-                    let src = (((yy - ay) as usize) * w + (cx0 - ax) as usize) * 3;
-                    let dst = (((yy - y0) as usize) * t + (cx0 - x0) as usize) * 3;
-                    b[dst..dst + n].copy_from_slice(&px[src..src + n]);
-                }
-            }
-        }
-        buf
+        assemble_grid(
+            x0,
+            y0,
+            t,
+            t,
+            end_x,
+            end_y,
+            lvl.tile_w as i64,
+            lvl.tile_h as i64,
+            |tx, ty| {
+                self.tile_index.levels[level]
+                    .get(&(tx, ty))
+                    .and_then(|e| self.decoder.decode_tile(e).ok())
+            },
+        )
     }
 }
 
@@ -428,25 +486,17 @@ impl MrxsReader {
     ) -> PyResult<Vec<Bound<'py, PyBytes>>> {
         self.check_level(level)?;
         let err = |e: String| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e);
-        let out: Result<Vec<Vec<u8>>, String> = py.allow_threads(|| {
-            let blanc = jpeg(&vec![255u8; tile * tile * 3], tile, tile, quality, optimize)?;
-            (0..ncols * nrows)
-                .into_par_iter()
-                .map(|k| {
-                    let (c, r) = ((k % ncols) as i64, (k / ncols) as i64);
-                    match self.assemble(
-                        level,
-                        x0 + c * tile as i64,
-                        y0 + r * tile as i64,
-                        tile,
-                        end_x,
-                        end_y,
-                    ) {
-                        Some(b) => jpeg(&b, tile, tile, quality, optimize),
-                        None => Ok(blanc.clone()),
-                    }
-                })
-                .collect()
+        let out = py.allow_threads(|| {
+            encode_grid(ncols, nrows, tile, quality, optimize, |c, r| {
+                self.assemble(
+                    level,
+                    x0 + c * tile as i64,
+                    y0 + r * tile as i64,
+                    tile,
+                    end_x,
+                    end_y,
+                )
+            })
         });
         Ok(out
             .map_err(err)?
@@ -456,8 +506,54 @@ impl MrxsReader {
     }
 }
 
+#[pymethods]
+impl MrxsReader {
+    /// Comme OpenSlide : fenêtre `size` = (w, h) du niveau `level`, coin `location` = (x, y) en
+    /// coordonnées du NIVEAU 0 (ramenées au niveau par division entière par son sous-échantillonnage).
+    /// Tableau (h, w, 3) RGB, BLANC hors des tuiles numérisées (pas de canal alpha).
+    fn read_region<'py>(
+        &self,
+        py: Python<'py>,
+        location: (i64, i64),
+        level: usize,
+        size: (usize, usize),
+    ) -> PyResult<Bound<'py, PyArray3<u8>>> {
+        self.check_level(level)?;
+        let ds = self.slide_info.levels[level].downsample;
+        let (x, y) = (
+            (location.0 as f64 / ds).floor() as i64,
+            (location.1 as f64 / ds).floor() as i64,
+        );
+        let (w, h) = size;
+        let px = py.allow_threads(|| {
+            let lvl = &self.slide_info.levels[level];
+            assemble_grid(
+                x,
+                y,
+                w,
+                h,
+                i64::MAX,
+                i64::MAX,
+                lvl.tile_w as i64,
+                lvl.tile_h as i64,
+                |tx, ty| {
+                    self.tile_index.levels[level]
+                        .get(&(tx, ty))
+                        .and_then(|e| self.decoder.decode_tile(e).ok())
+                },
+            )
+        });
+        let px = px.unwrap_or_else(|| vec![255u8; w * h * 3]);
+        Ok(Array3::from_shape_vec((h, w, 3), px)
+            .unwrap()
+            .into_pyarray_bound(py))
+    }
+}
+
 #[pymodule]
 fn omnissiah(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MrxsReader>()?;
+    m.add_class::<wsi::WsiReader>()?;
+    m.add("DicomReader", m.getattr("WsiReader")?)?; // alias v2.1 initiale
     Ok(())
 }

@@ -63,7 +63,7 @@ jobs:
       - name: Install and smoke test
         run: |
           pip install target/wheels/*.whl
-          python -c "from omnissiah import MrxsReader; print('import OK')"
+          python -c "from omnissiah import MrxsReader, WsiReader, DicomReader; print('import OK')"
 
   windows:
     name: Windows wheel (win_amd64)
@@ -98,7 +98,7 @@ jobs:
       - name: Install and smoke test
         run: |
           pip install target/wheels/*.whl
-          python -c "from omnissiah import MrxsReader; print('import OK')"
+          python -c "from omnissiah import MrxsReader, WsiReader, DicomReader; print('import OK')"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -113,5 +113,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Roues Python de omnissiah."
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Roues Python de omnissiah (MIRAX, DICOM, SVS, NDPI)."
           gh release upload "$GITHUB_REF_NAME" target/wheels/*.whl --clobber

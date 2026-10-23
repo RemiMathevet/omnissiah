@@ -2,7 +2,7 @@
 
 # Omnissiah
 
-High-performance MRXS whole slide image reader in Rust with Python bindings.
+High-performance whole slide image reader (MRXS, DICOM WSI, SVS, NDPI) in Rust with Python bindings.
 
 Omnissiah is a native Rust reimplementation of the MRXS parser and JPEG tile decoding pipeline, exposed to Python via PyO3. It is designed to eliminate the I/O bottleneck in computational pathology pipelines by saturating multi-core CPU decoding, freeing the GPU for inference.
 
@@ -65,13 +65,35 @@ print(reader.associated_images)  # ['label', 'macro', 'thumbnail']
 macro = reader.read_associated_image("macro")  # (H, W, 3) uint8
 ```
 
-## Tile encoding (`encode_tiles`, v0.2)
+## Tile encoding (`encode_tiles`, v2)
 
 `MrxsReader.encode_tiles` reads, assembles, fills the background white and JPEG-encodes (4:2:2) a grid of output tiles, entirely in Rust on all cores (rayon, GIL released). Built for MIRAX -> DICOM conversion: 2.9x faster than OpenSlide + Pillow on a full slide (12.6 s vs 37.1 s), decoded pixels identical.
 
 ```python
 jpegs = reader.encode_tiles(level, x0, y0, ncols, nrows, tile=1024, quality=80, optimize=True,
                             end_x=x_end, end_y=y_end)   # list[bytes], row-major
+```
+
+## Other formats: DICOM WSI, SVS, NDPI (`WsiReader`, v2.1)
+
+`WsiReader` opens **DICOM WSI, SVS (Aperio) and NDPI (Hamamatsu)**, chosen by extension (anything that is not `.svs` / `.tif(f)` / `.ndpi` is opened as a DICOM series folder or `.dcm`); `DicomReader` is an alias. Same API as `MrxsReader`: `slide_info`, `properties`, `read_region`, `read_tile`, `read_tiles_batch` (parallel, GIL released), `associated_images` / `read_associated_image`, `encode_tiles`. Native tile grid of each format; no new dependency (own TIFF / DICOM parsers, turbojpeg).
+
+| format | how | validated against |
+|---|---|---|
+| DICOM WSI | TILED_FULL / TILED_SPARSE, levels **concatenated over several files** (OpenSlide 4.0 rejects them), extended / basic offset table | OpenSlide (tiles), pydicom + Pillow (concatenated level 0) |
+| SVS | tiled TIFF, abbreviated JPEG (`JPEGTables`), RGB-coded JPEG (Adobe marker injected, as OpenSlide forces RGB); Aperio JPEG 2000 (33003 YCbCr 4:2:2 / 33005 RGB) through openjpeg, YCbCr→RGB fitted to OpenSlide's exact rounding | OpenSlide (level 0), tifffile + imagecodecs (all levels: OpenSlide shifts by a sub-pixel when the downsample is not an integer) |
+| NDPI | each level is ONE huge JPEG; `McuStarts` (65426) gives every restart interval, so square tiles are rebuilt by stacking the intervals of one column (no full decode) | OpenSlide, all native levels, pixel-identical |
+
+`read_region((x, y), level, (w, h))` (both readers, OpenSlide signature: level-0 coordinates) returns an RGB array, **white** outside the scanned tiles (no alpha); identical to OpenSlide wherever OpenSlide is opaque, on MIRAX, DICOM, SVS (JPEG and JPEG 2000) and NDPI.
+
+Speed, `read_region` 512² at level 0 vs OpenSlide (warm cache; 1 thread latency / 16 threads throughput): MIRAX 1.7x / 1.4x, DICOM 3.6x / 2.1x, SVS JPEG 6.5x / 2.7x, SVS JPEG 2000 5.9x / 1.2x (same openjpeg decoder), NDPI 2.3x / 1.2-1.4x. Reproduce with `examples/bench_vs_openslide.py`.
+
+Current limits: no LZW label, one focal plane, NDPI ≤ 4 GB. Small single-JPEG NDPI levels can be one row / column smaller than their TIFF header says.
+
+```python
+r = omnissiah.WsiReader("slide.ndpi")                 # .svs, .ndpi, DICOM folder or .dcm
+tiles = r.read_tiles_batch(coords, level=0)           # (N, 2) grid coords -> (N, h, w, 3)
+region = r.read_region((x, y), 0, (512, 512))         # OpenSlide signature, white background
 ```
 
 ## API comparison with OpenSlide
@@ -104,12 +126,17 @@ pytest tests/ -v
 
 Tests are skipped if no MRXS slide is available.
 
+DICOM tests (`tests/test_dicom.py`): `OMNISSIAH_TEST_DICOM_ARCHIVE` (a series OpenSlide can open, compared tile by tile) and `OMNISSIAH_TEST_DICOM_FULL` (a series with a concatenated level 0, compared frame by frame with pydicom + Pillow). SVS / NDPI tests (`tests/test_tiff.py`): `OMNISSIAH_TEST_SVS`, `OMNISSIAH_TEST_NDPI`, e.g. the CC0 OpenSlide test slides `CMU-1.svs` and `CMU-1.ndpi` (https://openslide.cs.cmu.edu/download/openslide-testdata/), `OMNISSIAH_TEST_SVS_J2K` (e.g. `JP2K-33003-1.svs`). `tests/test_read_region_mrxs.py` uses `OMNISSIAH_TEST_SLIDE`.
+
 ## Roadmap
 
 - **v0.1** (current): MRXS reader with full metadata, associated images, batch decode
 - **v0.2**: OME-Zarr converter, formal benchmarks, multi-scanner validation
 - **v0.3**: NDPI (Hamamatsu) support
-- Future: GPU JPEG decode (nvjpeg), DICOM-WSI, SVS
+- **v2**: `encode_tiles` (MIRAX -> DICOM re-tiling)
+- **v2.1**: DICOM WSI, SVS (Aperio, incl. JPEG 2000), NDPI (Hamamatsu) readers, `read_region`
+- Next: NDPI > 4 GB
+- Future: GPU JPEG decode (nvjpeg)
 
 ## Authors
 

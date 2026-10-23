@@ -1,6 +1,6 @@
 [package]
 name = "omnissiah"
-version = "0.2.0"
+version = "2.1.0"
 edition = "2021"
 
 [lib]
@@ -14,3 +14,4 @@ rayon = "1.10"
 turbojpeg = { version = "1", default-features = false, features = ["cmake", "pkg-config", "require-simd"] }
 memmap2 = "0.9"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+jpeg2k = { version = "0.10", default-features = false, features = ["openjpeg-sys"] }

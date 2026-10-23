@@ -107,7 +107,7 @@ impl TileDecoder {
     }
 }
 
-fn decode_jpeg(jpeg_data: &[u8]) -> Result<(Vec<u8>, usize, usize), String> {
+pub(crate) fn decode_jpeg(jpeg_data: &[u8]) -> Result<(Vec<u8>, usize, usize), String> {
     let mut decompressor =
         Decompressor::new().map_err(|e| format!("Cannot create JPEG decompressor: {}", e))?;
 
@@ -135,7 +135,7 @@ fn decode_jpeg(jpeg_data: &[u8]) -> Result<(Vec<u8>, usize, usize), String> {
     Ok((pixels, width, height))
 }
 
-fn resize_rgb(pixels: &[u8], src_w: usize, src_h: usize, target_size: usize) -> Vec<u8> {
+pub(crate) fn resize_rgb(pixels: &[u8], src_w: usize, src_h: usize, target_size: usize) -> Vec<u8> {
     use image::imageops::FilterType;
     use image::RgbImage;
 

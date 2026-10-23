@@ -2,7 +2,7 @@
 
 # Omnissiah
 
-Lecteur d'images de lames entières MRXS haute performance en Rust, avec bindings Python.
+Lecteur d'images de lames entières (MRXS, DICOM WSI, SVS, NDPI) haute performance en Rust, avec bindings Python.
 
 Omnissiah est une réimplémentation native en Rust du parseur MRXS et de la chaîne de décodage
 des tuiles JPEG, exposée à Python via PyO3. Il est conçu pour éliminer le goulot d'étranglement
@@ -71,7 +71,7 @@ print(reader.associated_images)  # ['label', 'macro', 'thumbnail']
 macro = reader.read_associated_image("macro")  # (H, W, 3) uint8
 ```
 
-## Encodage de tuiles (`encode_tiles`, v0.2)
+## Encodage de tuiles (`encode_tiles`, v2)
 
 `MrxsReader.encode_tiles` lit, assemble, remplit le fond en blanc et encode en JPEG (4:2:2) une grille de tuiles de sortie, entièrement en Rust sur tous les cœurs (rayon, GIL relâché). Conçu pour la conversion MIRAX -> DICOM : 2,9 x plus rapide qu'OpenSlide + Pillow sur une lame entière (12,6 s contre 37,1 s), pixels décodés identiques.
 
@@ -79,6 +79,20 @@ macro = reader.read_associated_image("macro")  # (H, W, 3) uint8
 jpegs = reader.encode_tiles(level, x0, y0, ncols, nrows, tile=1024, quality=80, optimize=True,
                             end_x=x_end, end_y=y_end)   # list[bytes], ligne par ligne
 ```
+
+## Autres formats : DICOM WSI, SVS, NDPI (`WsiReader`, v2.1)
+
+`WsiReader` ouvre le **DICOM WSI, le SVS (Aperio) et le NDPI (Hamamatsu)** selon l'extension (tout ce qui n'est pas `.svs` / `.tif(f)` / `.ndpi` est lu comme dossier de série DICOM ou `.dcm`) ; `DicomReader` en est un alias. Même API que `MrxsReader` : `slide_info`, `properties`, `read_region`, `read_tile`, `read_tiles_batch` (parallèle, GIL relâché), `associated_images` / `read_associated_image`, `encode_tiles`. Aucune nouvelle dépendance (analyseurs TIFF / DICOM maison, turbojpeg).
+
+- **DICOM WSI** : TILED_FULL / TILED_SPARSE, niveaux **concaténés sur plusieurs fichiers** (refusés par OpenSlide 4.0) ; validé contre OpenSlide et pydicom + Pillow.
+- **SVS** : TIFF tuilé, JPEG abrégé, JPEG codé RGB ; JPEG 2000 Aperio (33003 / 33005) via openjpeg, conversion YCbCr→RGB calée sur l'arrondi exact d'OpenSlide ; validé contre OpenSlide et tifffile.
+- **NDPI** : chaque niveau est UN seul JPEG géant ; les tuiles carrées sont reconstruites à partir de `McuStarts`, sans décodage complet ; pixels identiques à OpenSlide.
+
+`read_region((x, y), level, (w, h))` (signature OpenSlide, coordonnées du niveau 0) renvoie du RGB, **blanc** hors des tuiles numérisées ; identique à OpenSlide partout où OpenSlide est opaque.
+
+Vitesse, `read_region` 512² au niveau 0 face à OpenSlide (1 fil / 16 fils) : MIRAX 1,7 x / 1,4 x, DICOM 3,6 x / 2,1 x, SVS JPEG 6,5 x / 2,7 x, SVS JPEG 2000 5,9 x / 1,2 x, NDPI 2,3 x / 1,2-1,4 x (`examples/bench_vs_openslide.py`).
+
+Limites actuelles : pas d'étiquette LZW, un seul plan focal, NDPI ≤ 4 Go.
 
 ## Comparaison de l'API avec OpenSlide
 
@@ -117,7 +131,10 @@ Les tests sont ignorés si aucune lame MRXS n'est disponible.
 - **v0.1** (actuelle) : lecteur MRXS avec métadonnées complètes, images associées, décodage par lots
 - **v0.2** : convertisseur OME-Zarr, benchmarks formels, validation multi-scanner
 - **v0.3** : support NDPI (Hamamatsu)
-- À venir : décodage JPEG sur GPU (nvjpeg), DICOM-WSI, SVS
+- **v2** : `encode_tiles` (retuilage MIRAX -> DICOM)
+- **v2.1** : lecteurs DICOM WSI, SVS (Aperio, JPEG 2000 compris), NDPI (Hamamatsu), `read_region`
+- Ensuite : NDPI > 4 Go
+- À venir : décodage JPEG sur GPU (nvjpeg)
 
 ## Auteurs
 
